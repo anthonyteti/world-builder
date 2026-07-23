@@ -51,7 +51,7 @@ def srgb(hexcode, alpha=1.0):
 
 
 PAL = {
-    "body_dark":  "#313C55",
+    "body_dark":  "#4B5665",
     "slate":      "#36415C",
     "cape_blue":  "#4B8FE2",
     "white":      "#F5F5F5",
@@ -603,6 +603,148 @@ REF_BLEND = os.path.join(ASSET_DIR, "reference", "meshy_penguin.blend")
 REF_SCALE = 0.94 / 1.897          # reference height -> our 0.94 m
 REF_Z_LIFT = 0.952                # reference feet -> ground plane
 
+# Meshy part-segmentation source: each region is a separate mesh object, so
+# assigning one flat material per part gives perfectly clean colour borders.
+# Committed as a zip (compact); extracted to the .blend on first build.
+REF_SEG = os.path.join(ASSET_DIR, "reference", "meshy_segmented.blend")
+REF_SEG_ZIP = os.path.join(ASSET_DIR, "reference", "meshy_segmented.zip")
+SEG_TARGET_H = 0.94               # game height, metres
+
+
+def ensure_segmented_blend():
+    if os.path.exists(REF_SEG):
+        return True
+    if os.path.exists(REF_SEG_ZIP):
+        import zipfile
+        with zipfile.ZipFile(REF_SEG_ZIP) as z:
+            inner = next((n for n in z.namelist() if n.endswith(".blend")), None)
+            if inner:
+                with z.open(inner) as s, open(REF_SEG, "wb") as d:
+                    d.write(s.read())
+    return os.path.exists(REF_SEG)
+# part -> material key (identified by rendering each part in isolation)
+SEG_MAT = {
+    "model_part9": "body",        # head + torso
+    "model_part8": "white",       # belly plumage
+    "model_part1": "white",       # left eye disc
+    "model_part3": "white",       # right eye disc
+    "model_part2": "orange",      # beak
+    "model_part4": "orange",      # feet
+    "model_part10": "cape",       # scarf + cloak
+}
+SEG_EYES = ("model_part1", "model_part3")
+SEG_DROP = ("model_part0", "model_part5", "model_part6", "model_part7")  # hidden inner shells
+SEG_DECIMATE = {"model_part10": 0.05, "model_part9": 0.10, "model_part8": 0.09}
+SEG_DECIMATE_DEFAULT = 0.16
+
+
+def build_penguin_from_segments(donor, mats):
+    """Ship the user's Meshy part-segmented sculpt: one flat material per part
+    (clean borders by construction), decimated to a game budget, pupils and a
+    medallion added, then skin-weighted from the procedural donor."""
+    from mathutils import kdtree
+
+    names = list(SEG_MAT) + list(SEG_EYES) + list(SEG_DROP)
+    with bpy.data.libraries.load(REF_SEG) as (src, dst):
+        dst.objects = [n for n in dict.fromkeys(names) if n in src.objects]
+    loaded = {o.name.split(".")[0]: o for o in dst.objects if o}
+    for o in loaded.values():
+        bpy.context.scene.collection.objects.link(o)
+
+    mat_of = {"body": mats["body"], "white": mats["white"],
+              "orange": mats["orange"], "cape": mats["cape"],
+              "eye": mats["eye"], "gold": mats["gold"]}
+
+    parts = []
+    for pname, key in SEG_MAT.items():
+        o = loaded.get(pname)
+        if not o:
+            continue
+        o.data.materials.clear()
+        o.data.materials.append(mat_of[key])
+        ratio = SEG_DECIMATE.get(pname, SEG_DECIMATE_DEFAULT)
+        d = o.modifiers.new("Decimate", "DECIMATE")
+        d.ratio = ratio
+        apply_modifiers(o)
+        shade_smooth(o)
+        parts.append(o)
+
+    # flatten the protruding eye discs, then add big navy pupils
+    for en in SEG_EYES:
+        eye = loaded.get(en)
+        if not eye:
+            continue
+        vs = [v.co.copy() for v in eye.data.vertices]
+        c = sum(vs, Vector()) / len(vs)
+        nrm = sum((v.normal for v in eye.data.vertices), Vector())
+        nrm = (nrm.normalized() if nrm.length > 1e-6
+               else Vector((math.copysign(0.3, c.x), -1, 0)).normalized())
+        rad = max((v - c).length for v in vs)
+        # push the disc back toward the head so it bulges less
+        for v in eye.data.vertices:
+            along = (v.co - c).dot(nrm)
+            if along > 0:
+                v.co -= 0.6 * along * nrm
+        pup = uv_sphere("CH_Penguin_Pupil", segments=16, rings=9, radius=rad * 0.7)
+        transform_mesh(pup, Matrix.Diagonal((1, 1, 0.3, 1)))
+        rot = Vector((0, 0, 1)).rotation_difference(nrm).to_matrix().to_4x4()
+        transform_mesh(pup, rot)
+        transform_mesh(pup, Matrix.Translation(c + nrm * (rad * 0.12)))
+        pup.data.materials.append(mat_of["eye"])
+        shade_smooth(pup)
+        parts.append(pup)
+
+    # gold medallion at the front of the scarf
+    scarf = loaded.get("model_part10")
+    if scarf:
+        band = [v.co for v in scarf.data.vertices if v.co.y < 0]
+        if band:
+            zmid = sorted(v.z for v in band)[len(band) // 2]
+            front = [v for v in band if abs(v.z - zmid) < 0.06]
+            fc = min(front, key=lambda v: v.y)
+            med = uv_sphere("CH_Penguin_Medallion", segments=14, rings=8, radius=0.05)
+            transform_mesh(med, Matrix.Diagonal((1, 1, 0.5, 1)))
+            transform_mesh(med, Matrix.Translation(fc + Vector((0, -0.02, 0))))
+            med.data.materials.append(mat_of["gold"])
+            shade_smooth(med)
+            parts.append(med)
+
+    for pname in SEG_DROP:
+        o = loaded.get(pname)
+        if o:
+            bpy.data.objects.remove(o, do_unlink=True)
+
+    penguin = join_parts(parts, "CH_Penguin")
+
+    # orient to game space: feet on the ground, centred, target height, -Y front
+    vs = [v.co for v in penguin.data.vertices]
+    xs = [v.x for v in vs]; ys = [v.y for v in vs]; zs = [v.z for v in vs]
+    scale = SEG_TARGET_H / (max(zs) - min(zs))
+    cx = (min(xs) + max(xs)) / 2
+    cy = (min(ys) + max(ys)) / 2
+    transform_mesh(penguin, Matrix.Translation((-cx, -cy, -min(zs))))
+    transform_mesh(penguin, Matrix.Scale(scale, 4))
+    # nudge body centroid to y=0 so donor weight transfer lines up
+    ys2 = [v.co.y for v in penguin.data.vertices]
+    transform_mesh(penguin, Matrix.Translation((0, -sum(ys2) / len(ys2), 0)))
+    recalc_normals(penguin)
+
+    # skin weights: nearest donor vertex
+    kd = kdtree.KDTree(len(donor.data.vertices))
+    for i, v in enumerate(donor.data.vertices):
+        kd.insert(v.co, i)
+    kd.balance()
+    dgroups = {g.index: g.name for g in donor.vertex_groups}
+    dw = [[(dgroups[g.group], g.weight) for g in v.groups] for v in donor.data.vertices]
+    for v in penguin.data.vertices:
+        _, di, _ = kd.find(v.co)
+        for nm, wt in dw[di]:
+            vg = penguin.vertex_groups.get(nm) or penguin.vertex_groups.new(name=nm)
+            vg.add([v.index], wt, "REPLACE")
+
+    uv_unwrap(penguin)
+    return penguin
+
 
 def build_penguin_from_reference(donor, mats):
     """Use the user's Meshy sculpt as the character mesh: game-optimize it,
@@ -1153,19 +1295,27 @@ def main():
     # ---- penguin
     # the procedural build acts as donor for materials/weights; the shipped
     # mesh is the user's Meshy sculpt when the reference file is present
-    # The procedural model (clean separate parts, flat per-part materials) is
-    # the shipped character; set USE_REF=1 to instead ship the Meshy sculpt
-    # with baked-texture colouring.
-    use_ref = os.path.exists(REF_BLEND) and os.environ.get("USE_REF") == "1"
-    if use_ref:
+    # Character source, in priority order:
+    #   default  -> Meshy part-segmented sculpt (exact shape + clean per-part
+    #               flat colours), skin-weighted from the procedural donor
+    #   USE_REF=1 -> fused Meshy sculpt with baked-texture colouring
+    #   PROC=1    -> the procedural model itself
+    mode = ("proc" if os.environ.get("PROC") == "1"
+            else "ref" if os.environ.get("USE_REF") == "1"
+            else "seg" if ensure_segmented_blend()
+            else "proc")
+    if mode == "proc":
+        penguin = join_parts(build_penguin_parts(mats), "CH_Penguin")
+        uv_unwrap(penguin)
+    else:
         donor = join_parts(build_penguin_parts(mats), "DONOR_Penguin")
-        penguin = build_penguin_from_reference(donor, mats)  # unwraps internally
+        if mode == "seg":
+            penguin = build_penguin_from_segments(donor, mats)
+        else:
+            penguin = build_penguin_from_reference(donor, mats)
         donor_mesh = donor.data
         bpy.data.objects.remove(donor)
         bpy.data.meshes.remove(donor_mesh)
-    else:
-        penguin = join_parts(build_penguin_parts(mats), "CH_Penguin")
-        uv_unwrap(penguin)
 
     # ---- armature
     arm = build_armature()
