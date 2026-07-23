@@ -247,15 +247,18 @@ def crown_outline(w, h):
 # ============================================================================
 # PENGUIN
 # ============================================================================
-# Body ellipsoid parameters (world coords, character faces -Y).
-# Squat plush egg: wide, big head, effectively no neck.
+# Body parameters (world coords, character faces -Y).
+# Pear silhouette: bulk sits low, soft shoulder taper under the collar,
+# distinctly narrower round head (~75% of the body width, like the sheet).
 BODY_C = Vector((0.0, 0.0, 0.50))
-BODY_R = Vector((0.38, 0.35, 0.44))
-EGG = 0.06  # only a whisper of taper so the head stays large
+BODY_R = Vector((0.375, 0.345, 0.44))
 
 
 def body_radius_factor(zn):
-    return 1.0 - EGG * zn
+    """Lateral radius multiplier along the height (zn in [-1, 1])."""
+    low_bulge = 0.10 * (1.0 - smoothstep(-0.85, -0.05, zn))
+    head_pinch = 0.19 * smoothstep(-0.35, 0.50, zn)
+    return 1.0 + low_bulge - head_pinch
 
 
 def build_penguin_parts(mats):
@@ -296,18 +299,31 @@ def build_penguin_parts(mats):
         return n
 
     # ----------------------------------------------------------------- belly
-    # plumage layer: a dished white lens whose rim curls into the body, so the
-    # oval edge is perfectly smooth and adds a gentle plush chest bulge
-    bc_z = 0.32
-    by = surface_y(0.0, bc_z)
-    bn = surface_normal(0.0, by, bc_z)
-    brot = Vector((0.0, -1.0, 0.0)).rotation_difference(bn).to_matrix().to_4x4()
-    belly = uv_sphere("CH_Penguin_Belly", segments=24, rings=14, radius=1.0)
-    transform_mesh(belly, Matrix.Diagonal((0.305, 0.045, 0.245, 1.0)))
-    for v in belly.data.vertices:       # dish to the torso curvature
-        v.co.y += (v.co.x ** 2 + v.co.z ** 2) / (2.0 * 0.42)
-    transform_mesh(belly, brot)
-    transform_mesh(belly, Matrix.Translation(Vector((0.0, by, bc_z)) - bn * 0.012))
+    # plumage layer conformal to the pear profile: an oval shell floating a
+    # few mm proud of the surface. The rim never touches the faceted body
+    # (that would zigzag across polygon chords) — it hovers just above it,
+    # reading as a crisp fabric/feather edge with a fine shadow seam.
+    rim_n = 28
+    bc_z, b_rx, b_rz = 0.315, 0.295, 0.225
+    s_rings = (0.30, 0.60, 0.80, 0.93, 1.0)
+    s_offs = (0.0075, 0.0070, 0.0060, 0.0052, 0.0045)
+    bverts = [(0.0, surface_y(0.0, bc_z) - 0.0075, bc_z)]
+    for srad, off in zip(s_rings, s_offs):
+        for a in range(rim_n):
+            ang = TAU * a / rim_n
+            x = b_rx * srad * math.cos(ang)
+            z = bc_z + b_rz * srad * math.sin(ang)
+            bverts.append((x, surface_y(x, z) - off, z))
+    bfaces = [[0, 1 + a, 1 + (a + 1) % rim_n] for a in range(rim_n)]
+    for s in range(len(s_rings) - 1):
+        base = 1 + s * rim_n
+        for a in range(rim_n):
+            i, j = base + a, base + (a + 1) % rim_n
+            bfaces.append([i, j, j + rim_n, i + rim_n])
+    bmesh0 = bpy.data.meshes.new("CH_Penguin_Belly_Mesh")
+    bmesh0.from_pydata(bverts, [], bfaces)
+    bmesh0.update()
+    belly = new_object("CH_Penguin_Belly", bmesh0)
     belly.data.materials.append(mats["white"])
     shade_smooth(belly)
     assign_weights(belly, body_w)
@@ -318,7 +334,7 @@ def build_penguin_parts(mats):
     # surface normal and dished to the head's curvature, so the thin white rim
     # stays even all the way around instead of sinking or goggling
     for side in (1, -1):
-        ex, ez = 0.118 * side, 0.705
+        ex, ez = 0.112 * side, 0.705
         ey = surface_y(ex, ez)
         n = surface_normal(ex, ey, ez)
         p0 = Vector((ex, ey, ez))
@@ -328,7 +344,7 @@ def build_penguin_parts(mats):
             d = uv_sphere(name, segments=16, rings=10, radius=radius)
             transform_mesh(d, Matrix.Diagonal((0.95, th_scale, 1.06, 1.0)))
             for v in d.data.vertices:   # dish to the head curvature
-                v.co.y += (v.co.x ** 2 + v.co.z ** 2) / (2.0 * 0.34)
+                v.co.y += (v.co.x ** 2 + v.co.z ** 2) / (2.0 * 0.30)
             transform_mesh(d, rot)
             transform_mesh(d, Matrix.Translation(p0 + n * lift))
             d.data.materials.append(mat)
@@ -337,13 +353,16 @@ def build_penguin_parts(mats):
             parts.append(d)
 
         sfx = "_R" if side > 0 else "_L"
-        make_disc("CH_Penguin_Eye" + sfx, 0.101, 0.18, mats["white"], 0.003)
-        make_disc("CH_Penguin_Pupil" + sfx, 0.083, 0.15, mats["eye"], 0.012)
+        make_disc("CH_Penguin_Eye" + sfx, 0.097, 0.18, mats["white"], 0.003)
+        make_disc("CH_Penguin_Pupil" + sfx, 0.079, 0.15, mats["eye"], 0.012)
 
     # ------------------------------------------------------------------ beak
     # two soft rounded lobes: wide flat upper bill over a smaller lower lip
-    for nm, sc, pos in (("Upper", (0.055, 0.050, 0.027), (0.0, -0.345, 0.640)),
-                        ("Lower", (0.042, 0.040, 0.020), (0.0, -0.338, 0.614))):
+    # (anchored to the face surface so they track the pear profile)
+    for nm, sc, pos in (("Upper", (0.055, 0.050, 0.027),
+                         (0.0, surface_y(0.0, 0.640) - 0.030, 0.640)),
+                        ("Lower", (0.042, 0.040, 0.020),
+                         (0.0, surface_y(0.0, 0.614) - 0.024, 0.614))):
         lobe = uv_sphere("CH_Penguin_Beak" + nm, segments=12, rings=8, radius=1.0)
         transform_mesh(lobe, Matrix.Diagonal((sc[0], sc[1], sc[2], 1.0)))
         transform_mesh(lobe, Matrix.Translation(pos))
@@ -412,7 +431,7 @@ def build_penguin_parts(mats):
     med.name = "CH_Penguin_Medallion"
     med.data.name = "CH_Penguin_Medallion_Mesh"
     transform_mesh(med, Euler((D(90), 0, 0)).to_matrix().to_4x4())
-    transform_mesh(med, Matrix.Translation((0.0, -0.398, 0.475)))
+    transform_mesh(med, Matrix.Translation((0.0, -0.378, 0.475)))
     med.data.materials.append(mats["gold"])
     assign_weights(med, lambda co: {"Chest": 1.0})
     parts.append(med)
@@ -429,7 +448,7 @@ def build_penguin_parts(mats):
         for ui in range(nu):
             u = ui / (nu - 1)
             th = -theta_max + 2 * theta_max * u
-            r = 0.385 + 0.028 * t + 0.014 * t * math.sin(4.0 * th + 0.5)  # folds
+            r = 0.372 + 0.028 * t + 0.014 * t * math.sin(4.0 * th + 0.5)  # folds
             tail = (max(0.0, math.cos(2.4 * (th - theta_max * 0.55))) ** 3
                     + max(0.0, math.cos(2.4 * (th + theta_max * 0.55))) ** 3)
             droop = smoothstep(0.62, 1.0, t) * (0.065 * tail - 0.012)
@@ -491,7 +510,7 @@ def build_penguin_parts(mats):
             return w
         assign_weights(fl, flip_w)
         transform_mesh(fl, Euler((0, D(-24) * side, 0)).to_matrix().to_4x4())
-        transform_mesh(fl, Matrix.Translation((0.42 * side, 0.012, 0.36)))
+        transform_mesh(fl, Matrix.Translation((0.405 * side, 0.012, 0.36)))
         fl.data.materials.append(mats["body"])
         shade_smooth(fl)
         parts.append(fl)
@@ -529,7 +548,7 @@ def build_penguin_parts(mats):
         return {"Body": 1 - blend, "Tail": blend}
     assign_weights(tail, tail_w)
     transform_mesh(tail, Euler((D(-18), 0, 0)).to_matrix().to_4x4())
-    transform_mesh(tail, Matrix.Translation((0.0, 0.34, 0.07)))
+    transform_mesh(tail, Matrix.Translation((0.0, 0.30, 0.075)))
     tail.data.materials.append(mats["body"])
     shade_smooth(tail)
     parts.append(tail)
