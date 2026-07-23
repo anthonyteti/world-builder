@@ -624,16 +624,17 @@ def ensure_segmented_blend():
     return os.path.exists(REF_SEG)
 # part -> material key (identified by rendering each part in isolation)
 SEG_MAT = {
-    "model_part9": "body",        # head + torso
-    "model_part8": "white",       # belly plumage
+    "model_part9": "body",        # head + upper torso
+    "model_part8": "body",        # lower body/belly base (gray; white patch added on top)
     "model_part1": "white",       # left eye disc
     "model_part3": "white",       # right eye disc
     "model_part2": "orange",      # beak
-    "model_part4": "orange",      # feet
+    "model_part0": "orange",      # left foot
+    "model_part4": "orange",      # right foot
     "model_part10": "cape",       # scarf + cloak
 }
 SEG_EYES = ("model_part1", "model_part3")
-SEG_DROP = ("model_part0", "model_part5", "model_part6", "model_part7")  # hidden inner shells
+SEG_DROP = ("model_part5", "model_part6", "model_part7")  # hidden inner shells
 SEG_DECIMATE = {"model_part10": 0.05, "model_part9": 0.10, "model_part8": 0.09}
 SEG_DECIMATE_DEFAULT = 0.16
 
@@ -728,6 +729,48 @@ def build_penguin_from_segments(donor, mats):
     ys2 = [v.co.y for v in penguin.data.vertices]
     transform_mesh(penguin, Matrix.Translation((0, -sum(ys2) / len(ys2), 0)))
     recalc_normals(penguin)
+
+    # white belly patch: a radial oval disc (smooth elliptical rim) projected
+    # onto the belly ball, sitting a few mm proud so it reads as flush plumage
+    front = [v.co for v in penguin.data.vertices
+             if 0.24 < v.co.z < 0.34 and abs(v.co.x) < 0.10 and v.co.y < -0.05]
+    side = [v.co for v in penguin.data.vertices
+            if 0.22 < v.co.z < 0.36 and v.co.y < -0.03]
+    if front and side:
+        yfront = min(v.y for v in front)
+        R = max(abs(v.x) for v in side)
+        C = Vector((0.0, yfront + R, 0.29))
+        Rc = R + 0.008
+        a, b = 0.235, 0.275               # oval half-extents at the surface
+        nring, nseg = 9, 48
+        tu, tv = Vector((1, 0, 0)), Vector((0, 0, 1))
+        pole = C + Vector((0, -Rc, 0))
+        verts = [tuple(pole)]
+        for r in range(1, nring + 1):
+            fr = r / nring
+            for s in range(nseg):
+                ang = TAU * s / nseg
+                p = pole + tu * (a * fr * math.cos(ang)) + tv * (b * fr * math.sin(ang))
+                p = C + (p - C).normalized() * Rc
+                verts.append(tuple(p))
+        faces = [[0, 1 + s, 1 + (s + 1) % nseg] for s in range(nseg)]
+        for r in range(nring - 1):
+            base = 1 + r * nseg
+            for s in range(nseg):
+                i, j = base + s, base + (s + 1) % nseg
+                faces.append([i, j, j + nseg, i + nseg])
+        pmesh = bpy.data.meshes.new("CH_Penguin_BellyPatch_Mesh")
+        pmesh.from_pydata(verts, [], faces)
+        pmesh.update()
+        cap = new_object("CH_Penguin_BellyPatch", pmesh)
+        cap.data.materials.append(mats["white"])
+        shade_smooth(cap)
+        set_active(penguin)
+        cap.select_set(True)
+        penguin.select_set(True)
+        bpy.context.view_layer.objects.active = penguin
+        bpy.ops.object.join()
+        recalc_normals(penguin)
 
     # skin weights: nearest donor vertex
     kd = kdtree.KDTree(len(donor.data.vertices))
