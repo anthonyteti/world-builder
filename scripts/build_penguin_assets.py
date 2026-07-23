@@ -476,26 +476,27 @@ def build_penguin_parts(mats):
     # ------------------------------------------------------------------ cape
     # soft cloth: vertical fold ripples, hem falling into two long tapered
     # tails at the back corners
-    nu, nv = 17, 11
+    # full A-line cloak like the reference: attaches at the neck, wraps the
+    # back and sides, and flares out to the ground
+    nu, nv = 25, 15
     verts, faces = [], []
     for vi in range(nv):
         t = vi / (nv - 1)
-        theta_max = D(70 + 22 * t)
-        z_base = 0.585 - 0.53 * (t ** 0.94)
+        theta_max = D(94 + 34 * t)             # wraps past the sides, more at the hem
+        z_base = 0.60 - 0.60 * (t ** 0.86)     # neck -> below the feet
         for ui in range(nu):
             u = ui / (nu - 1)
             th = -theta_max + 2 * theta_max * u
-            # hugs the neck at the top, flares A-line to the ground like the
-            # reference instead of following the body's bottom tuck
-            wall = body_half_width(z_base) * (1 - smoothstep(0.25, 1.0, t)) \
-                + 0.30 * smoothstep(0.25, 1.0, t)
-            r = (0.96 * wall + 0.042 + 0.02 * t
-                 + 0.014 * t * math.sin(4.0 * th + 0.5))                 # folds
-            tail = (max(0.0, math.cos(2.4 * (th - theta_max * 0.55))) ** 3
-                    + max(0.0, math.cos(2.4 * (th + theta_max * 0.55))) ** 3)
-            droop = smoothstep(0.62, 1.0, t) * (0.05 * tail - 0.012)
-            zz = z_base - droop + (0.014 * math.cos(3.0 * th) if vi == nv - 1 else 0.0)
-            verts.append((r * math.sin(th), r * math.cos(th) + 0.05 * t, zz))
+            # near the neck the cloth hugs the body; lower down it becomes a
+            # free A-line skirt whose radius grows toward the hem
+            hug = body_half_width(max(z_base, 0.30)) * (1 - smoothstep(0.20, 0.9, t))
+            flare = (0.235 + 0.145 * t) * smoothstep(0.20, 0.9, t)
+            standoff = 0.008 + 0.03 * t          # clings at the neck, free lower
+            r = hug + flare + standoff + 0.02 * t * math.sin(5.0 * th)   # folds
+            # slight scalloped hem, lifts a touch at the very front opening
+            open_lift = smoothstep(0.75, 1.0, t) * max(0.0, math.cos(th)) * 0.05
+            zz = z_base + open_lift + (0.012 * math.cos(4.0 * th) if vi == nv - 1 else 0.0)
+            verts.append((r * math.sin(th), r * math.cos(th) + 0.045 * t, zz))
     for vi in range(nv - 1):
         for ui in range(nu - 1):
             a = vi * nu + ui
@@ -512,7 +513,7 @@ def build_penguin_parts(mats):
     shade_smooth(cape)
 
     def cape_w(co):
-        t = min(max((0.585 - co.z) / 0.53, 0.0), 1.0)
+        t = min(max((0.60 - co.z) / 0.60, 0.0), 1.0)
         blend = smoothstep(0.25, 0.85, t)
         w = {"Cape.1": 1 - blend, "Cape.2": blend}
         if t < 0.10:
@@ -1152,16 +1153,18 @@ def main():
     # ---- penguin
     # the procedural build acts as donor for materials/weights; the shipped
     # mesh is the user's Meshy sculpt when the reference file is present
-    donor = join_parts(build_penguin_parts(mats), "DONOR_Penguin")
-    if os.path.exists(REF_BLEND):
+    # The procedural model (clean separate parts, flat per-part materials) is
+    # the shipped character; set USE_REF=1 to instead ship the Meshy sculpt
+    # with baked-texture colouring.
+    use_ref = os.path.exists(REF_BLEND) and os.environ.get("USE_REF") == "1"
+    if use_ref:
+        donor = join_parts(build_penguin_parts(mats), "DONOR_Penguin")
         penguin = build_penguin_from_reference(donor, mats)  # unwraps internally
         donor_mesh = donor.data
         bpy.data.objects.remove(donor)
         bpy.data.meshes.remove(donor_mesh)
     else:
-        penguin = donor
-        penguin.name = "CH_Penguin"
-        penguin.data.name = "CH_Penguin_Mesh"
+        penguin = join_parts(build_penguin_parts(mats), "CH_Penguin")
         uv_unwrap(penguin)
 
     # ---- armature
