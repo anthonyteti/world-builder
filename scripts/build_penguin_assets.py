@@ -57,11 +57,11 @@ PAL = {
     "orange":     "#F2A23B",
     "gold":       "#C9A24B",
     "gold_dark":  "#9E7B33",
-    "eye_black":  "#0B0F1A",
+    "eye_black":  "#1A2138",   # dark navy pupils, warmer than pure black
     "steel":      "#C9CED8",
     "steel_dark": "#3B4150",
     "wrap_dark":  "#2B3040",
-    "ground":     "#7E8D84",
+    "ground":     "#D9CDB2",   # warm sand, close to the concept sheet's cream
 }
 
 # ----------------------------------------------------------------------------
@@ -248,9 +248,10 @@ def crown_outline(w, h):
 # PENGUIN
 # ============================================================================
 # Body ellipsoid parameters (world coords, character faces -Y).
-BODY_C = Vector((0.0, 0.0, 0.52))
-BODY_R = Vector((0.35, 0.32, 0.46))
-EGG = 0.14  # taper: top narrower, bottom wider (pear/egg shape)
+# Squat plush egg: wide, big head, effectively no neck.
+BODY_C = Vector((0.0, 0.0, 0.50))
+BODY_R = Vector((0.38, 0.35, 0.44))
+EGG = 0.06  # only a whisper of taper so the head stays large
 
 
 def body_radius_factor(zn):
@@ -261,7 +262,7 @@ def build_penguin_parts(mats):
     parts = []
 
     # ------------------------------------------------------------------ body
-    body = uv_sphere("CH_Penguin_Body", segments=20, rings=14, radius=1.0)
+    body = uv_sphere("CH_Penguin_Body", segments=28, rings=18, radius=1.0)
     for v in body.data.vertices:
         f = body_radius_factor(v.co.z)
         v.co.x *= BODY_R.x * f
@@ -269,82 +270,119 @@ def build_penguin_parts(mats):
         v.co.z *= BODY_R.z
     transform_mesh(body, Matrix.Translation(BODY_C))
     body.data.materials.append(mats["body"])
-    body.data.materials.append(mats["white"])
-    for p in body.data.polygons:
-        c = p.center
-        in_oval = (c.x / 0.29) ** 2 + ((c.z - 0.34) / 0.245) ** 2 <= 1.0
-        if c.y < -0.02 and in_oval and c.z < 0.55:   # cap keeps white under the collar
-            p.material_index = 1
+    shade_smooth(body)
 
     def body_w(co):
         z = co.z
-        a = smoothstep(0.33, 0.52, z)      # Body -> Chest
-        b = smoothstep(0.52, 0.70, z)      # Chest -> Head
+        a = smoothstep(0.32, 0.50, z)      # Body -> Chest
+        b = smoothstep(0.50, 0.68, z)      # Chest -> Head
         return {"Body": (1 - a), "Chest": a * (1 - b), "Head": a * b}
     assign_weights(body, body_w)
     parts.append(body)
 
+    def surface_y(x, z):
+        """Front (-Y) surface of the body ellipsoid at a given x, z."""
+        zn = (z - BODY_C.z) / BODY_R.z
+        f = body_radius_factor(zn)
+        arg = 1.0 - zn * zn - (x / (BODY_R.x * f)) ** 2
+        return -BODY_R.y * f * math.sqrt(max(arg, 0.0))
+
+    def surface_normal(x, y, z):
+        zn = (z - BODY_C.z) / BODY_R.z
+        f = body_radius_factor(zn)
+        n = Vector((x / (BODY_R.x * f) ** 2, y / (BODY_R.y * f) ** 2,
+                    zn / BODY_R.z))
+        n.normalize()
+        return n
+
+    # ----------------------------------------------------------------- belly
+    # plumage layer: a dished white lens whose rim curls into the body, so the
+    # oval edge is perfectly smooth and adds a gentle plush chest bulge
+    bc_z = 0.32
+    by = surface_y(0.0, bc_z)
+    bn = surface_normal(0.0, by, bc_z)
+    brot = Vector((0.0, -1.0, 0.0)).rotation_difference(bn).to_matrix().to_4x4()
+    belly = uv_sphere("CH_Penguin_Belly", segments=24, rings=14, radius=1.0)
+    transform_mesh(belly, Matrix.Diagonal((0.305, 0.045, 0.245, 1.0)))
+    for v in belly.data.vertices:       # dish to the torso curvature
+        v.co.y += (v.co.x ** 2 + v.co.z ** 2) / (2.0 * 0.42)
+    transform_mesh(belly, brot)
+    transform_mesh(belly, Matrix.Translation(Vector((0.0, by, bc_z)) - bn * 0.012))
+    belly.data.materials.append(mats["white"])
+    shade_smooth(belly)
+    assign_weights(belly, body_w)
+    parts.append(belly)
+
     # ------------------------------------------------------------------ eyes
-    # big dark pupil with an even thin white ring, facing forward (-Y)
+    # flat calm ovals hugging the head: each disc is oriented along the local
+    # surface normal and dished to the head's curvature, so the thin white rim
+    # stays even all the way around instead of sinking or goggling
     for side in (1, -1):
-        yaw = D(4) * side  # barely outward, keeps them from looking cross-eyed
-        n = Euler((0, 0, yaw)).to_matrix() @ Vector((0.0, -1.0, 0.0))
-        center = Vector((0.116 * side, -0.250, 0.712))
+        ex, ez = 0.118 * side, 0.705
+        ey = surface_y(ex, ez)
+        n = surface_normal(ex, ey, ez)
+        p0 = Vector((ex, ey, ez))
+        rot = Vector((0.0, -1.0, 0.0)).rotation_difference(n).to_matrix().to_4x4()
 
-        eye = uv_sphere("CH_Penguin_Eye" + ("_R" if side > 0 else "_L"),
-                        segments=14, rings=10, radius=0.099)
-        transform_mesh(eye, Matrix.Diagonal((1.0, 0.30, 1.0, 1.0)))
-        transform_mesh(eye, Euler((0, 0, yaw)).to_matrix().to_4x4())
-        transform_mesh(eye, Matrix.Translation(center))
-        eye.data.materials.append(mats["white"])
-        shade_smooth(eye)
-        assign_weights(eye, lambda co: {"Head": 1.0})
-        parts.append(eye)
+        def make_disc(name, radius, th_scale, mat, lift):
+            d = uv_sphere(name, segments=16, rings=10, radius=radius)
+            transform_mesh(d, Matrix.Diagonal((0.95, th_scale, 1.06, 1.0)))
+            for v in d.data.vertices:   # dish to the head curvature
+                v.co.y += (v.co.x ** 2 + v.co.z ** 2) / (2.0 * 0.34)
+            transform_mesh(d, rot)
+            transform_mesh(d, Matrix.Translation(p0 + n * lift))
+            d.data.materials.append(mat)
+            shade_smooth(d)
+            assign_weights(d, lambda co: {"Head": 1.0})
+            parts.append(d)
 
-        pup = uv_sphere("CH_Penguin_Pupil" + ("_R" if side > 0 else "_L"),
-                        segments=12, rings=8, radius=0.079)
-        transform_mesh(pup, Matrix.Diagonal((1.0, 0.28, 1.0, 1.0)))
-        transform_mesh(pup, Euler((0, 0, yaw)).to_matrix().to_4x4())
-        transform_mesh(pup, Matrix.Translation(center + n * 0.014))
-        pup.data.materials.append(mats["eye"])
-        shade_smooth(pup)
-        assign_weights(pup, lambda co: {"Head": 1.0})
-        parts.append(pup)
+        sfx = "_R" if side > 0 else "_L"
+        make_disc("CH_Penguin_Eye" + sfx, 0.101, 0.18, mats["white"], 0.003)
+        make_disc("CH_Penguin_Pupil" + sfx, 0.083, 0.15, mats["eye"], 0.012)
 
     # ------------------------------------------------------------------ beak
-    # small wide flat bill sitting just under the eye line
-    beak = cone("CH_Penguin_Beak", verts=8, r1=0.06, r2=0.02, depth=0.11)
-    transform_mesh(beak, Euler((D(96), 0, 0)).to_matrix().to_4x4())
-    transform_mesh(beak, Matrix.Diagonal((1.0, 1.0, 0.5, 1.0)))
-    transform_mesh(beak, Matrix.Translation((0.0, -0.33, 0.645)))
-    beak.data.materials.append(mats["orange"])
-    assign_weights(beak, lambda co: {"Head": 1.0})
-    parts.append(beak)
+    # two soft rounded lobes: wide flat upper bill over a smaller lower lip
+    for nm, sc, pos in (("Upper", (0.055, 0.050, 0.027), (0.0, -0.345, 0.640)),
+                        ("Lower", (0.042, 0.040, 0.020), (0.0, -0.338, 0.614))):
+        lobe = uv_sphere("CH_Penguin_Beak" + nm, segments=12, rings=8, radius=1.0)
+        transform_mesh(lobe, Matrix.Diagonal((sc[0], sc[1], sc[2], 1.0)))
+        transform_mesh(lobe, Matrix.Translation(pos))
+        lobe.data.materials.append(mats["orange"])
+        shade_smooth(lobe)
+        assign_weights(lobe, lambda co: {"Head": 1.0})
+        parts.append(lobe)
 
     # ------------------------------------------------------------------ tuft
-    # three little feather spikes on the crown of the head
-    for dx, tilt, h in ((0.0, D(-18), 0.085), (0.045, D(24), 0.06), (-0.05, D(-40), 0.055)):
-        tuft = cone("CH_Penguin_Tuft", verts=5, r1=0.026, r2=0.004, depth=h)
-        transform_mesh(tuft, Euler((tilt if dx == 0 else D(-12), 0,
-                                    0 if dx == 0 else math.copysign(D(28), dx))).to_matrix().to_4x4())
-        transform_mesh(tuft, Matrix.Translation((dx, 0.02 if dx == 0 else 0.0, 0.985)))
+    # three rounded, asymmetrical little feathers on the crown
+    for dx, dy, rot, sc in ((0.005, 0.015, (D(-14), 0, D(6)), 1.0),
+                            (0.048, 0.005, (D(-8), 0, D(32)), 0.8),
+                            (-0.042, 0.028, (D(-30), 0, D(-26)), 0.72)):
+        tuft = uv_sphere("CH_Penguin_Tuft", segments=8, rings=6, radius=1.0)
+        transform_mesh(tuft, Matrix.Diagonal((0.024 * sc, 0.024 * sc, 0.055 * sc, 1.0)))
+        transform_mesh(tuft, Euler(rot).to_matrix().to_4x4())
+        transform_mesh(tuft, Matrix.Translation((dx, dy, 0.945)))
         tuft.data.materials.append(mats["body"])
+        shade_smooth(tuft)
         assign_weights(tuft, lambda co: {"Head": 1.0})
         parts.append(tuft)
 
     # ---------------------------------------------------------------- collar
-    # draped shoulder cowl with a V-dip at the chest (replaces the old torus)
-    nu_c, rows = 18, 3
-    row_off = (0.014, 0.048, 0.075)     # radial offset from body surface per row
-    row_z = (0.625, 0.565, 0.505)       # base heights, top -> bottom
+    # soft gathered cowl: fabric folds ripple around the shoulders and dip
+    # into a V at the chest where the medallion pins it
+    nu_c, rows = 26, 4
+    row_off = (0.010, 0.030, 0.048, 0.064)   # radial offset per row, top -> bottom
+    row_z = (0.615, 0.575, 0.535, 0.487)
     cverts, cfaces = [], []
     for ri in range(rows):
+        rt = ri / (rows - 1)
         for ui in range(nu_c):
             th = TAU * ui / nu_c        # 0 = front (-Y)
             dip = max(0.0, math.cos(th)) ** 3
             back = (1.0 - math.cos(th)) * 0.5
-            z = row_z[ri] + 0.035 * back - 0.045 * dip
-            off = row_off[ri] * (1.0 - 0.45 * dip)   # hug the chest at the V
+            gather = 1.0 + 0.30 * rt * math.sin(3.5 * th + 0.8) ** 2   # cloth folds
+            z = row_z[ri] + 0.035 * back - 0.042 * dip \
+                + 0.012 * rt * math.sin(2.5 * th + 1.7)                # organic hem
+            off = row_off[ri] * gather * (1.0 - 0.45 * dip)
             zn = (z - BODY_C.z) / BODY_R.z
             f = body_radius_factor(zn)
             rx = BODY_R.x * f * math.sqrt(max(0.0, 1.0 - zn * zn)) + off
@@ -361,9 +399,10 @@ def build_penguin_parts(mats):
     collar = new_object("CH_Penguin_Collar", cmesh0)
     collar.data.materials.append(mats["cape"])
     solc = collar.modifiers.new("Solidify", "SOLIDIFY")
-    solc.thickness = 0.022
+    solc.thickness = 0.018
     solc.offset = 1.0
     apply_modifiers(collar)
+    shade_smooth(collar)
     assign_weights(collar, lambda co: {"Chest": 1.0})
     parts.append(collar)
 
@@ -373,23 +412,28 @@ def build_penguin_parts(mats):
     med.name = "CH_Penguin_Medallion"
     med.data.name = "CH_Penguin_Medallion_Mesh"
     transform_mesh(med, Euler((D(90), 0, 0)).to_matrix().to_4x4())
-    transform_mesh(med, Matrix.Translation((0.0, -0.383, 0.49)))
+    transform_mesh(med, Matrix.Translation((0.0, -0.398, 0.475)))
     med.data.materials.append(mats["gold"])
     assign_weights(med, lambda co: {"Chest": 1.0})
     parts.append(med)
 
     # ------------------------------------------------------------------ cape
-    nu, nv = 13, 9
+    # soft cloth: vertical fold ripples, hem falling into two long tapered
+    # tails at the back corners
+    nu, nv = 17, 11
     verts, faces = [], []
     for vi in range(nv):
         t = vi / (nv - 1)
-        theta_max = D(72 + 20 * t)
-        r = 0.355 + 0.035 * t
-        z = 0.62 - 0.52 * (t ** 0.94)
+        theta_max = D(70 + 22 * t)
+        z_base = 0.60 - 0.50 * (t ** 0.94)
         for ui in range(nu):
             u = ui / (nu - 1)
             th = -theta_max + 2 * theta_max * u
-            zz = z + (0.022 * math.cos(3.0 * th) if vi == nv - 1 else 0.0)
+            r = 0.385 + 0.028 * t + 0.014 * t * math.sin(4.0 * th + 0.5)  # folds
+            tail = (max(0.0, math.cos(2.4 * (th - theta_max * 0.55))) ** 3
+                    + max(0.0, math.cos(2.4 * (th + theta_max * 0.55))) ** 3)
+            droop = smoothstep(0.62, 1.0, t) * (0.065 * tail - 0.012)
+            zz = z_base - droop + (0.014 * math.cos(3.0 * th) if vi == nv - 1 else 0.0)
             verts.append((r * math.sin(th), r * math.cos(th) + 0.05 * t, zz))
     for vi in range(nv - 1):
         for ui in range(nu - 1):
@@ -401,12 +445,13 @@ def build_penguin_parts(mats):
     cape = new_object("CH_Penguin_Cape", cmesh)
     cape.data.materials.append(mats["cape"])
     sol = cape.modifiers.new("Solidify", "SOLIDIFY")
-    sol.thickness = 0.022
+    sol.thickness = 0.018
     sol.offset = 1.0
     apply_modifiers(cape)
+    shade_smooth(cape)
 
     def cape_w(co):
-        t = min(max((0.62 - co.z) / 0.52, 0.0), 1.0)
+        t = min(max((0.60 - co.z) / 0.52, 0.0), 1.0)
         blend = smoothstep(0.25, 0.85, t)
         w = {"Cape.1": 1 - blend, "Cape.2": blend}
         if t < 0.10:
@@ -417,59 +462,76 @@ def build_penguin_parts(mats):
 
     # --------------------------------------------------------- crown emblem
     # bent onto the cape's cylindrical curve so its edges hug the cloth
-    crown = ngon_prism("CH_Penguin_CapeCrown", crown_outline(0.19, 0.15), -0.012, 0.026)
-    r_bend = 0.40
+    crown = ngon_prism("CH_Penguin_CapeCrown", crown_outline(0.19, 0.15), -0.014, 0.026)
+    r_bend = 0.42
     for v in crown.data.vertices:
         th = v.co.x / r_bend
         rr = r_bend + v.co.y
         v.co.x = rr * math.sin(th)
         v.co.y = rr * math.cos(th) - r_bend
     transform_mesh(crown, Euler((D(10), 0, 0)).to_matrix().to_4x4())
-    transform_mesh(crown, Matrix.Translation((0.0, 0.408, 0.36)))
+    transform_mesh(crown, Matrix.Translation((0.0, 0.432, 0.36)))
     crown.data.materials.append(mats["gold"])
     assign_weights(crown, cape_w)
     parts.append(crown)
 
     # -------------------------------------------------------------- flippers
+    # broader, softer paddles hanging down-and-out from under the cowl
     for side, lbl in ((1, ".R"), (-1, ".L")):
-        fl = uv_sphere("CH_Penguin_Flipper" + lbl, segments=10, rings=8, radius=1.0)
-        transform_mesh(fl, Matrix.Diagonal((0.05, 0.095, 0.20, 1.0)))
+        fl = uv_sphere("CH_Penguin_Flipper" + lbl, segments=12, rings=9, radius=1.0)
+        transform_mesh(fl, Matrix.Diagonal((0.055, 0.115, 0.21, 1.0)))
         zs = [v.co.z for v in fl.data.vertices]
 
         def flip_w(co, _zs=zs):
-            t = (0.20 - co.z) / 0.40          # 0 at shoulder end, 1 at tip
+            t = (0.21 - co.z) / 0.42          # 0 at shoulder end, 1 at tip
             blend = smoothstep(0.30, 0.72, t)
             w = {"Flipper" + lbl: 1 - blend, "FlipperTip" + lbl: blend}
             if t < 0.12:
                 w["Chest"] = 0.35 * (1 - t / 0.12)
             return w
         assign_weights(fl, flip_w)
-        transform_mesh(fl, Euler((0, D(-22) * side, 0)).to_matrix().to_4x4())
-        transform_mesh(fl, Matrix.Translation((0.40 * side, 0.012, 0.36)))
+        transform_mesh(fl, Euler((0, D(-24) * side, 0)).to_matrix().to_4x4())
+        transform_mesh(fl, Matrix.Translation((0.42 * side, 0.012, 0.36)))
         fl.data.materials.append(mats["body"])
+        shade_smooth(fl)
         parts.append(fl)
 
     # ------------------------------------------------------------------ feet
+    # broad soft feet with three visible toes to ground the character
     for side, lbl in ((1, ".R"), (-1, ".L")):
-        ft = uv_sphere("CH_Penguin_Foot" + lbl, segments=10, rings=6, radius=1.0)
-        transform_mesh(ft, Matrix.Diagonal((0.08, 0.14, 0.05, 1.0)))
-        assign_weights(ft, lambda co: {"Foot" + lbl: 1.0})
-        transform_mesh(ft, Euler((0, 0, D(-8) * side)).to_matrix().to_4x4())
-        transform_mesh(ft, Matrix.Translation((0.155 * side, -0.125, 0.042)))
-        ft.data.materials.append(mats["orange"])
-        parts.append(ft)
+        foot_parts = []
+        heel = uv_sphere("CH_Penguin_Foot" + lbl, segments=12, rings=7, radius=1.0)
+        transform_mesh(heel, Matrix.Diagonal((0.085, 0.085, 0.048, 1.0)))
+        transform_mesh(heel, Matrix.Translation((0.0, -0.02, 0.0)))
+        foot_parts.append(heel)
+        for ti, ang in enumerate((-17, 0, 17)):
+            toe = uv_sphere("CH_Penguin_Toe" + lbl, segments=10, rings=6, radius=1.0)
+            transform_mesh(toe, Matrix.Diagonal((0.036, 0.088, 0.042, 1.0)))
+            transform_mesh(toe, Euler((0, 0, D(ang))).to_matrix().to_4x4())
+            reach = 0.085 if ti == 1 else 0.072
+            toe_pos = Vector((math.sin(D(ang)) * reach, -math.cos(D(ang)) * reach - 0.02, -0.003))
+            transform_mesh(toe, Matrix.Translation(toe_pos))
+            foot_parts.append(toe)
+        for fp in foot_parts:
+            assign_weights(fp, lambda co: {"Foot" + lbl: 1.0})
+            transform_mesh(fp, Euler((0, 0, D(-9) * side)).to_matrix().to_4x4())
+            transform_mesh(fp, Matrix.Translation((0.16 * side, -0.10, 0.045)))
+            fp.data.materials.append(mats["orange"])
+            shade_smooth(fp)
+            parts.append(fp)
 
     # ------------------------------------------------------------------ tail
-    tail = uv_sphere("CH_Penguin_Tail", segments=8, rings=6, radius=1.0)
-    transform_mesh(tail, Matrix.Diagonal((0.065, 0.13, 0.04, 1.0)))
+    tail = uv_sphere("CH_Penguin_Tail", segments=10, rings=7, radius=1.0)
+    transform_mesh(tail, Matrix.Diagonal((0.075, 0.13, 0.045, 1.0)))
 
     def tail_w(co):
         blend = smoothstep(-0.06, 0.05, co.y)
         return {"Body": 1 - blend, "Tail": blend}
     assign_weights(tail, tail_w)
     transform_mesh(tail, Euler((D(-18), 0, 0)).to_matrix().to_4x4())
-    transform_mesh(tail, Matrix.Translation((0.0, 0.33, 0.075)))
+    transform_mesh(tail, Matrix.Translation((0.0, 0.34, 0.07)))
     tail.data.materials.append(mats["body"])
+    shade_smooth(tail)
     parts.append(tail)
 
     return parts
@@ -497,24 +559,24 @@ def join_parts(parts, name):
 BONES = [
     # name, head, tail, parent, connected, deform
     ("Root",         (0, 0, 0),            (0, 0.25, 0),          None,        False, False),
-    ("Body",         (0, 0, 0.28),         (0, 0, 0.50),          "Root",      False, True),
-    ("Chest",        (0, 0, 0.50),         (0, 0, 0.68),          "Body",      True,  True),
-    ("Head",         (0, 0, 0.68),         (0, 0, 0.99),          "Chest",     True,  True),
-    ("Flipper.R",    (0.335, 0.01, 0.545), (0.41, 0.01, 0.40),    "Chest",     False, True),
-    ("FlipperTip.R", (0.41, 0.01, 0.40),   (0.475, 0.01, 0.205),  "Flipper.R", True,  True),
-    ("Grip.R",       (0.475, 0.01, 0.205), (0.475, -0.11, 0.205), "FlipperTip.R", False, False),
-    ("Flipper.L",    (-0.335, 0.01, 0.545),(-0.41, 0.01, 0.40),   "Chest",     False, True),
-    ("FlipperTip.L", (-0.41, 0.01, 0.40),  (-0.475, 0.01, 0.205), "Flipper.L", True,  True),
-    ("Grip.L",       (-0.475, 0.01, 0.205),(-0.475, -0.11, 0.205),"FlipperTip.L", False, False),
-    ("Leg.R",        (0.155, -0.02, 0.20), (0.155, -0.02, 0.075), "Body",      False, True),
-    ("Foot.R",       (0.155, -0.02, 0.075),(0.155, -0.21, 0.045), "Leg.R",     True,  True),
-    ("Leg.L",        (-0.155, -0.02, 0.20),(-0.155, -0.02, 0.075),"Body",      False, True),
-    ("Foot.L",       (-0.155, -0.02, 0.075),(-0.155, -0.21, 0.045),"Leg.L",    True,  True),
-    ("Tail",         (0, 0.20, 0.10),      (0, 0.42, 0.05),       "Body",      False, True),
-    ("Cape.1",       (0, 0.33, 0.60),      (0, 0.355, 0.38),      "Chest",     False, True),
-    ("Cape.2",       (0, 0.355, 0.38),     (0, 0.40, 0.10),       "Cape.1",    True,  True),
-    ("Weapon_Back",  (0, 0.46, 0.42),      (0.28, 0.46, 0.86),    "Chest",     False, False),
-    ("Weapon_Ground",(0.55, 0, 0.0),       (0.55, 0, 0.30),       "Root",      False, False),
+    ("Body",         (0, 0, 0.26),         (0, 0, 0.48),          "Root",      False, True),
+    ("Chest",        (0, 0, 0.48),         (0, 0, 0.66),          "Body",      True,  True),
+    ("Head",         (0, 0, 0.66),         (0, 0, 0.95),          "Chest",     True,  True),
+    ("Flipper.R",    (0.36, 0.01, 0.53),   (0.43, 0.01, 0.385),   "Chest",     False, True),
+    ("FlipperTip.R", (0.43, 0.01, 0.385),  (0.50, 0.01, 0.185),   "Flipper.R", True,  True),
+    ("Grip.R",       (0.50, 0.01, 0.185),  (0.50, -0.11, 0.185),  "FlipperTip.R", False, False),
+    ("Flipper.L",    (-0.36, 0.01, 0.53),  (-0.43, 0.01, 0.385),  "Chest",     False, True),
+    ("FlipperTip.L", (-0.43, 0.01, 0.385), (-0.50, 0.01, 0.185),  "Flipper.L", True,  True),
+    ("Grip.L",       (-0.50, 0.01, 0.185), (-0.50, -0.11, 0.185), "FlipperTip.L", False, False),
+    ("Leg.R",        (0.16, -0.02, 0.20),  (0.16, -0.02, 0.075),  "Body",      False, True),
+    ("Foot.R",       (0.16, -0.02, 0.075), (0.16, -0.22, 0.045),  "Leg.R",     True,  True),
+    ("Leg.L",        (-0.16, -0.02, 0.20), (-0.16, -0.02, 0.075), "Body",      False, True),
+    ("Foot.L",       (-0.16, -0.02, 0.075),(-0.16, -0.22, 0.045), "Leg.L",     True,  True),
+    ("Tail",         (0, 0.22, 0.10),      (0, 0.44, 0.05),       "Body",      False, True),
+    ("Cape.1",       (0, 0.36, 0.58),      (0, 0.385, 0.36),      "Chest",     False, True),
+    ("Cape.2",       (0, 0.385, 0.36),     (0, 0.43, 0.08),       "Cape.1",    True,  True),
+    ("Weapon_Back",  (0, 0.48, 0.40),      (0.28, 0.48, 0.84),    "Chest",     False, False),
+    ("Weapon_Ground",(0.58, 0, 0.0),       (0.58, 0, 0.30),       "Root",      False, False),
 ]
 
 
@@ -718,17 +780,19 @@ def build_env(mats):
     place_gameplay_cam(cam, yaw_deg=42.0, target=Vector((0.0, 0.0, 0.42)))
     bpy.context.scene.camera = cam
 
+    # soft warm key + generous ambient: illustrated look, gentle shadows
     key_data = bpy.data.lights.new("LGT_Sun_Key_Data", type="SUN")
-    key_data.energy = 3.2
-    key_data.angle = D(4)
+    key_data.energy = 2.3
+    key_data.angle = D(25)
+    key_data.color = (1.0, 0.956, 0.878)
     key = bpy.data.objects.new("LGT_Sun_Key", key_data)
     key.rotation_euler = Euler((D(40), D(-18), D(-30)))
     bpy.context.scene.collection.objects.link(key)
 
     fill_data = bpy.data.lights.new("LGT_Sun_Fill_Data", type="SUN")
-    fill_data.energy = 1.0
-    fill_data.angle = D(30)
-    fill_data.color = (0.75, 0.82, 1.0)
+    fill_data.energy = 1.2
+    fill_data.angle = D(60)
+    fill_data.color = (0.88, 0.90, 1.0)
     fill = bpy.data.objects.new("LGT_Sun_Fill", fill_data)
     fill.rotation_euler = Euler((D(55), D(20), D(140)))
     bpy.context.scene.collection.objects.link(fill)
@@ -737,8 +801,8 @@ def build_env(mats):
     bpy.context.scene.world = world
     world.use_nodes = True
     bg = world.node_tree.nodes.get("Background")
-    bg.inputs[0].default_value = srgb("#CBD3D9")
-    bg.inputs[1].default_value = 0.55
+    bg.inputs[0].default_value = srgb("#F2E9DA")
+    bg.inputs[1].default_value = 0.85
     return ground, cam, (key, fill)
 
 

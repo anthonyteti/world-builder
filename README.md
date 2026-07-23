@@ -15,10 +15,13 @@ built from the character concept sheet ("Richard the Penguin Knight").
 
 ## Asset specs
 
-**CH_Penguin** — ~2,750 tris, 6 flat-colour materials (`M_Penguin_Dark`,
+**CH_Penguin** — ~5,900 tris, 6 flat-colour materials (`M_Penguin_Dark`,
 `M_Penguin_White`, `M_Penguin_EyeBlack`, `M_Penguin_Orange`, `M_Cape_Blue`,
-`M_Gold`), colours sampled from the concept palette. 1.03 m tall, origin at
-the centre of the feet on the ground plane, faces **-Y** in Blender (imports
+`M_Gold`), colours sampled from the concept palette. Rounded plush-mascot
+build: squat smooth-shaded egg body, flat oval eyes with navy pupils and thin
+white rims, two-lobe bill, plumage belly lens, gathered cloth cowl, cape with
+fold ripples and tapered tails, three-toed feet. 1.0 m tall, origin at the
+centre of the feet on the ground plane, faces **-Y** in Blender (imports
 facing **-Z** in Godot). Scale/rotation applied.
 
 **WPN_Greatsword** — ~520 tris, 6 materials (`M_Sword_Steel`, `M_Sword_Face`,
