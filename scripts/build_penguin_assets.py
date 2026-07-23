@@ -18,6 +18,7 @@ import os
 import sys
 
 import bpy
+import numpy as np
 from mathutils import Euler, Matrix, Vector
 
 # ----------------------------------------------------------------------------
@@ -597,6 +598,187 @@ def build_penguin_parts(mats):
     return parts
 
 
+REF_BLEND = os.path.join(ASSET_DIR, "reference", "meshy_penguin.blend")
+REF_SCALE = 0.94 / 1.897          # reference height -> our 0.94 m
+REF_Z_LIFT = 0.952                # reference feet -> ground plane
+
+
+def build_penguin_from_reference(donor, mats):
+    """Use the user's Meshy sculpt as the character mesh: game-optimize it,
+    then transfer materials and skin weights from the procedural donor
+    (which was fitted to the same proportions)."""
+    import bmesh
+    from mathutils import kdtree, bvhtree
+
+    with bpy.data.libraries.load(REF_BLEND) as (src, dst):
+        dst.objects = ["mesh_node"]
+    ref = dst.objects[0]
+    bpy.context.scene.collection.objects.link(ref)
+    ref.name = "CH_Penguin"
+    ref.data.name = "CH_Penguin_Mesh"
+    transform_mesh(ref, Matrix.Translation((0.0, 0.0, REF_Z_LIFT)))
+    transform_mesh(ref, Matrix.Scale(REF_SCALE, 4))
+
+    # ---- landmark detection on the full-res mesh (crisper than post-decimate)
+    # scarf knot: front-most cluster at chest height
+    knot_pts = [v.co.copy() for v in ref.data.vertices
+                if 0.44 < v.co.z < 0.54 and abs(v.co.x) < 0.10 and v.co.y < -0.31]
+    knot_c = sum(knot_pts, Vector()) / len(knot_pts) if knot_pts else None
+
+    # game budget: ~166k tris -> ~13k
+    dec = ref.modifiers.new("Decimate", "DECIMATE")
+    dec.ratio = 0.08
+    apply_modifiers(ref)
+    merge_doubles(ref, 0.0006)
+    shade_smooth(ref)
+
+    # ---- skin weights: nearest donor vertex
+    kd = kdtree.KDTree(len(donor.data.vertices))
+    for i, v in enumerate(donor.data.vertices):
+        kd.insert(v.co, i)
+    kd.balance()
+    donor_groups = {g.index: g.name for g in donor.vertex_groups}
+    donor_w = []
+    for v in donor.data.vertices:
+        donor_w.append([(donor_groups[g.group], g.weight) for g in v.groups])
+    for v in ref.data.vertices:
+        _, di, _ = kd.find(v.co)
+        for name, wgt in donor_w[di]:
+            vg = ref.vertex_groups.get(name) or ref.vertex_groups.new(name=name)
+            vg.add([v.index], wgt, "REPLACE")
+
+    # ---- materials: analytic regions baked to a texture
+    # Flat per-face material index can never be smoother than the triangle
+    # size, so region borders zigzag. Instead we evaluate the analytic regions
+    # per-texel into an image: borders become pixel-crisp and topology-
+    # independent, and one textured material exports cleanly to Godot.
+    me = ref.data
+
+    # detect the two eye discs (forward-facing vertex clusters on the head)
+    eye_discs = []
+    for side in (1, -1):
+        sel = [v for v in me.vertices
+               if v.normal.y < -0.72 and 0.60 < v.co.z < 0.82
+               and 0.03 < v.co.x * side < 0.26 and v.co.y < -0.14]
+        if sel:
+            cc = sum((v.co for v in sel), Vector()) / len(sel)
+            nn = sum((v.normal for v in sel), Vector()) / len(sel)
+            nn.normalize()
+            eye_discs.append((np.array(cc), np.array(nn)))
+
+    # store sRGB display values: the image is tagged sRGB and Blender converts
+    # to linear on sample, so pre-linearizing here would darken everything
+    def disp(hexcode):
+        h = hexcode.lstrip("#")
+        return np.array([int(h[i:i + 2], 16) / 255.0 for i in (0, 2, 4)])
+    C = {k: disp(PAL[k]) for k in
+         ("body_dark", "white", "eye_black", "orange", "cape_blue", "gold")}
+
+    def region_colors(P):
+        """Vectorized analytic colouring. P: (N,3) object-space -> (N,3) RGB."""
+        x, y, z = P[:, 0], P[:, 1], P[:, 2]
+        rxy = np.hypot(x, y) + 1e-6
+        front = -y / rxy                        # 1 at front (-Y), -1 at back
+        out = np.tile(C["body_dark"], (len(P), 1))
+
+        belly = (front > 0.30) & ((x / 0.235) ** 2
+                                  + ((z - 0.245) / 0.215) ** 2 <= 1.0)
+        out[belly] = C["white"]
+        cape = (z < 0.585) & ((y > 0.03) | ((front < 0.15) & (z < 0.36)))
+        out[cape] = C["cape_blue"]
+        scarf_lo = 0.455 - 0.055 * np.clip(front, 0.0, None)
+        out[(z > scarf_lo) & (z < 0.60)] = C["cape_blue"]
+
+        flip = (np.abs(x) > 0.24) & (z > 0.12) & (z < 0.50) & (y < 0.06)
+        out[flip] = C["body_dark"]
+        out[(z < 0.065) & (y < 0.10) & (np.abs(x) < 0.24)] = C["orange"]      # feet
+        out[(np.abs(x) < 0.075) & (z > 0.585) & (z < 0.685)
+            & (y < -0.255)] = C["orange"]                                     # beak
+
+        for cc, nn in eye_discs:
+            rel = P - cc
+            along = rel @ nn
+            planar = np.linalg.norm(rel - np.outer(along, nn), axis=1)
+            disc = np.abs(along) < 0.05
+            out[disc & (planar < 0.072)] = C["white"]
+            out[disc & (planar < 0.040)] = C["eye_black"]
+
+        if knot_c is not None:
+            out[np.linalg.norm(P - np.array(knot_c), axis=1) < 0.05] = C["gold"]
+        return out
+
+    # UV unwrap, then rasterize every triangle into the texture
+    uv_unwrap(ref)
+    SIZE = 1024
+    buf = np.zeros((SIZE, SIZE, 3), np.float32)
+    filled = np.zeros((SIZE, SIZE), bool)
+    uv = me.uv_layers.active.data
+    co = [np.array(v.co) for v in me.vertices]
+    me.calc_loop_triangles()
+    for lt in me.loop_triangles:
+        pw = [co[vi] for vi in lt.vertices]
+        pt = [np.array(uv[li].uv) * SIZE for li in lt.loops]
+        (ax, ay), (bx, by), (cx, cy) = pt
+        x0 = max(int(math.floor(min(ax, bx, cx))), 0)
+        x1 = min(int(math.ceil(max(ax, bx, cx))), SIZE - 1)
+        y0 = max(int(math.floor(min(ay, by, cy))), 0)
+        y1 = min(int(math.ceil(max(ay, by, cy))), SIZE - 1)
+        if x1 < x0 or y1 < y0:
+            continue
+        det = (by - cy) * (ax - cx) + (cx - bx) * (ay - cy)
+        if abs(det) < 1e-9:
+            continue
+        gx, gy = np.meshgrid(np.arange(x0, x1 + 1) + 0.5,
+                             np.arange(y0, y1 + 1) + 0.5)
+        w0 = ((by - cy) * (gx - cx) + (cx - bx) * (gy - cy)) / det
+        w1 = ((cy - ay) * (gx - cx) + (ax - cx) * (gy - cy)) / det
+        w2 = 1.0 - w0 - w1
+        inside = (w0 >= -0.01) & (w1 >= -0.01) & (w2 >= -0.01)
+        if not inside.any():
+            continue
+        P = (w0[..., None] * pw[0] + w1[..., None] * pw[1]
+             + w2[..., None] * pw[2])[inside]
+        cols = region_colors(P)
+        ys = gy[inside].astype(int)
+        xs = gx[inside].astype(int)
+        buf[ys, xs] = cols
+        filled[ys, xs] = True
+
+    # dilate filled texels outward so UV-island edges don't show seams
+    for _ in range(4):
+        empty = ~filled
+        for dy, dx in ((1, 0), (-1, 0), (0, 1), (0, -1)):
+            src = np.roll(np.roll(filled, dy, 0), dx, 1)
+            take = empty & src
+            if take.any():
+                sb = np.roll(np.roll(buf, dy, 0), dx, 1)
+                buf[take] = sb[take]
+                filled[take] = True
+
+    img = bpy.data.images.new("T_Penguin", SIZE, SIZE)
+    img.colorspace_settings.name = "sRGB"
+    rgba = np.dstack([buf, np.ones((SIZE, SIZE, 1), np.float32)])
+    img.pixels = rgba.ravel()
+    img.pack()
+    os.makedirs(os.path.join(EXPORT_DIR, "textures"), exist_ok=True)
+    img.filepath_raw = os.path.join(EXPORT_DIR, "textures", "penguin_albedo.png")
+    img.file_format = "PNG"
+    img.save()
+
+    mat = bpy.data.materials.new("M_Penguin")
+    mat.use_nodes = True
+    bsdf = mat.node_tree.nodes.get("Principled BSDF")
+    bsdf.inputs["Roughness"].default_value = 0.9
+    tex = mat.node_tree.nodes.new("ShaderNodeTexImage")
+    tex.image = img
+    tex.interpolation = "Closest"               # crisp pixel-art sampling
+    mat.node_tree.links.new(tex.outputs["Color"], bsdf.inputs["Base Color"])
+    me.materials.clear()
+    me.materials.append(mat)
+
+    return ref
+
+
 def join_parts(parts, name):
     for p in parts:
         recalc_normals(p)
@@ -968,9 +1150,19 @@ def main():
     }
 
     # ---- penguin
-    parts = build_penguin_parts(mats)
-    penguin = join_parts(parts, "CH_Penguin")
-    uv_unwrap(penguin)
+    # the procedural build acts as donor for materials/weights; the shipped
+    # mesh is the user's Meshy sculpt when the reference file is present
+    donor = join_parts(build_penguin_parts(mats), "DONOR_Penguin")
+    if os.path.exists(REF_BLEND):
+        penguin = build_penguin_from_reference(donor, mats)  # unwraps internally
+        donor_mesh = donor.data
+        bpy.data.objects.remove(donor)
+        bpy.data.meshes.remove(donor_mesh)
+    else:
+        penguin = donor
+        penguin.name = "CH_Penguin"
+        penguin.data.name = "CH_Penguin_Mesh"
+        uv_unwrap(penguin)
 
     # ---- armature
     arm = build_armature()

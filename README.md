@@ -15,14 +15,20 @@ built from the character concept sheet ("Richard the Penguin Knight").
 
 ## Asset specs
 
-**CH_Penguin** — ~5,900 tris, 6 flat-colour materials (`M_Penguin_Dark`,
-`M_Penguin_White`, `M_Penguin_EyeBlack`, `M_Penguin_Orange`, `M_Cape_Blue`,
-`M_Gold`), colours sampled from the concept palette. Rounded plush-mascot
-build: squat smooth-shaded egg body, flat oval eyes with navy pupils and thin
-white rims, two-lobe bill, plumage belly lens, gathered cloth cowl, cape with
-fold ripples and tapered tails, three-toed feet. 1.0 m tall, origin at the
-centre of the feet on the ground plane, faces **-Y** in Blender (imports
-facing **-Z** in Godot). Scale/rotation applied.
+**CH_Penguin** — ~13,400 tris, single textured material `M_Penguin`
+(1024×1024 albedo, nearest-neighbour sampled for the pixel-art look). The mesh
+is the user's Meshy sculpt (`assets/reference/meshy_penguin.blend`),
+decimated to a game budget and re-scaled to 0.94 m. Colour regions (slate-navy
+body, white belly, blue scarf/cape, orange beak/feet, gold medallion, white
+eyes with navy pupils) are computed from analytic 3-D region functions and
+**baked per-texel into the albedo texture**, so region borders are pixel-crisp
+and independent of the irregular sculpt topology. Origin at the centre of the
+feet on the ground plane, faces **-Y** in Blender (imports facing **-Z** in
+Godot). Scale/rotation applied.
+
+The procedural penguin from earlier iterations is still in the script
+(`build_penguin_parts`) and is used as the skin-weight donor; if the reference
+blend is absent the build falls back to shipping that procedural mesh.
 
 **WPN_Greatsword** — ~520 tris, 6 materials (`M_Sword_Steel`, `M_Sword_Face`,
 `M_Gold`, `M_Gold_Dark`, `M_Sword_Wrap`, `M_Sword_Gem`). 2.36 m long
