@@ -622,19 +622,22 @@ def ensure_segmented_blend():
                 with z.open(inner) as s, open(REF_SEG, "wb") as d:
                     d.write(s.read())
     return os.path.exists(REF_SEG)
-# part -> material key (identified by rendering each part in isolation)
+# part -> material key (identified by rendering each part in isolation).
+# Note p8 is the whole lower body: it contains both flippers AND both feet, so
+# feet are re-coloured by position after assembly, and the cloak's front drape
+# is trimmed away to reveal the gray flippers.
 SEG_MAT = {
     "model_part9": "body",        # head + upper torso
-    "model_part8": "body",        # lower body/belly base (gray; white patch added on top)
+    "model_part8": "body",        # lower body incl. flippers + feet
     "model_part1": "white",       # left eye disc
     "model_part3": "white",       # right eye disc
     "model_part2": "orange",      # beak
-    "model_part0": "orange",      # left foot
-    "model_part4": "orange",      # right foot
     "model_part10": "cape",       # scarf + cloak
 }
 SEG_EYES = ("model_part1", "model_part3")
-SEG_DROP = ("model_part5", "model_part6", "model_part7")  # hidden inner shells
+SEG_CAPE = "model_part10"
+SEG_DROP = ("model_part0", "model_part4", "model_part5",
+            "model_part6", "model_part7")  # duplicate feet + hidden inner shells
 SEG_DECIMATE = {"model_part10": 0.05, "model_part9": 0.10, "model_part8": 0.09}
 SEG_DECIMATE_DEFAULT = 0.16
 
@@ -730,8 +733,41 @@ def build_penguin_from_segments(donor, mats):
     transform_mesh(penguin, Matrix.Translation((0, -sum(ys2) / len(ys2), 0)))
     recalc_normals(penguin)
 
-    # white belly patch: a radial oval disc (smooth elliptical rim) projected
-    # onto the belly ball, sitting a few mm proud so it reads as flush plumage
+    # ---- two orange webbed feet at the bottom front (clear and readable;
+    # the Meshy body's own feet are only faint bumps)
+    zmin = min(v.co.z for v in penguin.data.vertices)
+    fr_pts = [v.co for v in penguin.data.vertices
+              if v.co.z < zmin + 0.12 and abs(v.co.x) < 0.22]
+    yfoot = min(v.y for v in fr_pts) if fr_pts else -0.2
+    feet = []
+    for sgn in (1, -1):
+        fparts = []
+        heel = uv_sphere("CH_Penguin_Foot", segments=12, rings=8, radius=1.0)
+        transform_mesh(heel, Matrix.Diagonal((0.075, 0.075, 0.05, 1.0)))
+        fparts.append(heel)
+        for ang in (-22, 0, 22):
+            toe = uv_sphere("CH_Penguin_Toe", segments=10, rings=6, radius=1.0)
+            transform_mesh(toe, Matrix.Diagonal((0.032, 0.085, 0.045, 1.0)))
+            transform_mesh(toe, Euler((0, 0, D(ang))).to_matrix().to_4x4())
+            transform_mesh(toe, Matrix.Translation((math.sin(D(ang)) * 0.075,
+                                                    -math.cos(D(ang)) * 0.075, 0.0)))
+            fparts.append(toe)
+        foot = join_parts(fparts, "CH_Penguin_Foot")
+        transform_mesh(foot, Euler((0, 0, D(-8) * sgn)).to_matrix().to_4x4())
+        transform_mesh(foot, Matrix.Translation((0.135 * sgn, yfoot + 0.03, zmin + 0.035)))
+        foot.data.materials.append(mats["orange"])
+        shade_smooth(foot)
+        feet.append(foot)
+    set_active(penguin)
+    for f in feet:
+        f.select_set(True)
+    penguin.select_set(True)
+    bpy.context.view_layer.objects.active = penguin
+    bpy.ops.object.join()
+    recalc_normals(penguin)
+
+    # ---- white belly patch: a radial oval disc projected onto a sphere fitted
+    # to the belly, so it sits a few mm proud with a smooth elliptical rim
     front = [v.co for v in penguin.data.vertices
              if 0.24 < v.co.z < 0.34 and abs(v.co.x) < 0.10 and v.co.y < -0.05]
     side = [v.co for v in penguin.data.vertices
@@ -739,9 +775,9 @@ def build_penguin_from_segments(donor, mats):
     if front and side:
         yfront = min(v.y for v in front)
         R = max(abs(v.x) for v in side)
-        C = Vector((0.0, yfront + R, 0.29))
+        C = Vector((0.0, yfront + R, 0.27))
         Rc = R + 0.008
-        a, b = 0.235, 0.275               # oval half-extents at the surface
+        a, b = 0.235, 0.285               # oval half-extents at the surface
         nring, nseg = 9, 48
         tu, tv = Vector((1, 0, 0)), Vector((0, 0, 1))
         pole = C + Vector((0, -Rc, 0))
@@ -770,6 +806,27 @@ def build_penguin_from_segments(donor, mats):
         penguin.select_set(True)
         bpy.context.view_layer.objects.active = penguin
         bpy.ops.object.join()
+        recalc_normals(penguin)
+
+    # ---- conform the eyes to the head sphere so they wrap around it, and
+    # nudge them slightly up/forward
+    head = [v.co for v in penguin.data.vertices
+            if v.co.z > 0.66 and abs(v.co.x) < 0.32 and v.co.y < 0.15]
+    if head:
+        Ch = sum(head, Vector()) / len(head)
+        Rh = sum((v - Ch).length for v in head) / len(head)
+        slot = {m.name: i for i, m in enumerate(penguin.data.materials)}
+        for off, key in ((0.006, "white"), (0.011, "eye")):
+            mi = slot.get(mats[key].name)
+            vids = set()
+            for p in penguin.data.polygons:
+                if p.material_index == mi and p.center.z > 0.58:
+                    vids.update(p.vertices)
+            for vi in vids:
+                v = penguin.data.vertices[vi]
+                d = v.co - Ch + Vector((0, -0.01, 0.015))   # tuck in, lift slightly
+                if d.length > 1e-6:
+                    v.co = Ch + d.normalized() * (Rh + off)
         recalc_normals(penguin)
 
     # skin weights: nearest donor vertex
