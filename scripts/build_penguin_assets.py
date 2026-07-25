@@ -741,20 +741,18 @@ def build_penguin_from_segments(donor, mats):
     yfoot = min(v.y for v in fr_pts) if fr_pts else -0.2
     feet = []
     for sgn in (1, -1):
-        fparts = []
-        heel = uv_sphere("CH_Penguin_Foot", segments=12, rings=8, radius=1.0)
-        transform_mesh(heel, Matrix.Diagonal((0.075, 0.075, 0.05, 1.0)))
-        fparts.append(heel)
-        for ang in (-22, 0, 22):
-            toe = uv_sphere("CH_Penguin_Toe", segments=10, rings=6, radius=1.0)
-            transform_mesh(toe, Matrix.Diagonal((0.032, 0.085, 0.045, 1.0)))
-            transform_mesh(toe, Euler((0, 0, D(ang))).to_matrix().to_4x4())
-            transform_mesh(toe, Matrix.Translation((math.sin(D(ang)) * 0.075,
-                                                    -math.cos(D(ang)) * 0.075, 0.0)))
-            fparts.append(toe)
-        foot = join_parts(fparts, "CH_Penguin_Foot")
-        transform_mesh(foot, Euler((0, 0, D(-8) * sgn)).to_matrix().to_4x4())
-        transform_mesh(foot, Matrix.Translation((0.135 * sgn, yfoot + 0.03, zmin + 0.035)))
+        # smooth flat webbed paddle: a flattened ellipsoid, wider and rounded at
+        # the front, with three shallow toe scallops carved by the mesh, not
+        # separate balls
+        foot = uv_sphere("CH_Penguin_Foot", segments=20, rings=10, radius=1.0)
+        for v in foot.data.vertices:
+            x, y, z = v.co
+            scallop = 1.0 + 0.10 * math.cos(3.0 * math.atan2(x, -y)) if y < 0 else 1.0
+            v.co.x = x * 0.085 * scallop
+            v.co.y = y * 0.115
+            v.co.z = z * 0.038
+        transform_mesh(foot, Euler((D(-10), 0, D(-7) * sgn)).to_matrix().to_4x4())
+        transform_mesh(foot, Matrix.Translation((0.14 * sgn, yfoot + 0.02, zmin + 0.028)))
         foot.data.materials.append(mats["orange"])
         shade_smooth(foot)
         feet.append(foot)
@@ -806,27 +804,6 @@ def build_penguin_from_segments(donor, mats):
         penguin.select_set(True)
         bpy.context.view_layer.objects.active = penguin
         bpy.ops.object.join()
-        recalc_normals(penguin)
-
-    # ---- conform the eyes to the head sphere so they wrap around it, and
-    # nudge them slightly up/forward
-    head = [v.co for v in penguin.data.vertices
-            if v.co.z > 0.66 and abs(v.co.x) < 0.32 and v.co.y < 0.15]
-    if head:
-        Ch = sum(head, Vector()) / len(head)
-        Rh = sum((v - Ch).length for v in head) / len(head)
-        slot = {m.name: i for i, m in enumerate(penguin.data.materials)}
-        for off, key in ((0.006, "white"), (0.011, "eye")):
-            mi = slot.get(mats[key].name)
-            vids = set()
-            for p in penguin.data.polygons:
-                if p.material_index == mi and p.center.z > 0.58:
-                    vids.update(p.vertices)
-            for vi in vids:
-                v = penguin.data.vertices[vi]
-                d = v.co - Ch + Vector((0, -0.01, 0.015))   # tuck in, lift slightly
-                if d.length > 1e-6:
-                    v.co = Ch + d.normalized() * (Rh + off)
         recalc_normals(penguin)
 
     # skin weights: nearest donor vertex
